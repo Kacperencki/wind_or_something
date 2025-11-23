@@ -16,7 +16,7 @@ RESAMPLE_RULE = "10min"
 SLOTS_PER_DAY = 144   # 24 h * 60 / 10
 
 # Sliding window forecast
-WINDOW  = 36      # last 2 hours
+WINDOW  = 12      # last 2 hours
 HORIZON = 1       # 10 minutes ahead
 
 TRAIN_RATIO = 0.7
