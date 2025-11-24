@@ -26,13 +26,15 @@ def _to_device(x_np: np.ndarray):
 
 
 def cp_decompose(X_np: np.ndarray, rank: int,
-                 n_iter_max: int = 50, tol: float = 1e-4):
+                 n_iter_max: int = 200, tol: float = 1e-6):
     """
     X_np: (D, T, F) as NumPy
     Returns:
         X_rec_np: reconstruction as NumPy
         rel_error: ||X - X_rec||_F / ||X||_F (float)
     """
+
+
     start = time.time()
 
     X_t, device = _to_device(X_np)
@@ -62,7 +64,7 @@ def cp_decompose(X_np: np.ndarray, rank: int,
 
 
 def tucker_decompose(X_np: np.ndarray, ranks,
-                     n_iter_max: int = 50, tol: float = 1e-4):
+                     n_iter_max: int = 200, tol: float = 1e-6):
     """
     ranks: (R1, R2, R3)
     """

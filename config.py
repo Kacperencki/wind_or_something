@@ -22,12 +22,12 @@ HORIZON = 1       # 10 minutes ahead
 TRAIN_RATIO = 0.7
 VAL_RATIO   = 0.15
 
-CP_RANKS = [3, 5, 10, 15, 20]
+CP_RANKS = [25, 30]
 
 TUCKER_RANKS = [
-    (10, 20, 3),
-    (20, 40, 3),
-    (30, 60, 3),
+
+    (40, 80, 3),
+    (50, 100, 3)
 ]
 
 SEED = 42
