@@ -1,144 +1,180 @@
-# run_experiments.py
+# run.py
 
-import numpy as np
-from pprint import pprint
 import os
-import pandas as pd   
+import numpy as np
+import pandas as pd
 
 from preprocess import load_dataset
-from decompose import run_all_decompositions
+from decompose import (
+    run_all_decompositions,
+    tucker_latent_features_core,
+    tucker_latent_features_mode3,
+)
 from windows import tensor_to_timeseries, make_sliding_windows, time_split
 from models import (
-    persistence_baseline,
+    evaluate_regression,
     train_ridge, test_ridge,
-    train_mlp, test_mlp,
     train_lstm, test_lstm,
-    train_cnn, test_cnn,
 )
-from config import WINDOW, HORIZON
-
-
-def build_windows_from_tensor(X, Y):
-    X_ts, y_ts = tensor_to_timeseries(X, Y)
-    X_win, y_win = make_sliding_windows(X_ts, y_ts, WINDOW, HORIZON)
-    return X_win, y_win
-
-
-def evaluate_setting(name, X_win, y_win):
-    print(f"\n=== Setting: {name} ===")
-    (X_train, y_train), (X_val, y_val), (X_test, y_test) = time_split(X_win, y_win)
-
-    # Baseline
-    baseline_mae, baseline_rmse = persistence_baseline(X_test, y_test)
-    print("Persistence baseline  MAE/RMSE:", baseline_mae, baseline_rmse)
-
-    # Ridge
-    ridge, val_mae, val_rmse = train_ridge(X_train, y_train, X_val, y_val)
-    print("Ridge val MAE/RMSE:", val_mae, val_rmse)
-    ridge_mae, ridge_rmse = test_ridge(ridge, X_test, y_test)
-    print("Ridge test MAE/RMSE:", ridge_mae, ridge_rmse)
-
-    # MLP
-    mlp, val_mae, val_rmse = train_mlp(X_train, y_train, X_val, y_val)
-    print("MLP val MAE/RMSE:", val_mae, val_rmse)
-    mlp_mae, mlp_rmse = test_mlp(mlp, X_test, y_test)
-    print("MLP test MAE/RMSE:", mlp_mae, mlp_rmse)
-
-    # LSTM
-    lstm, _ = train_lstm(X_train, y_train, X_val, y_val)
-    lstm_mae, lstm_rmse = test_lstm(lstm, X_test, y_test)
-    print("LSTM test MAE/RMSE:", lstm_mae, lstm_rmse)
-
-    # CNN
-    cnn, _ = train_cnn(X_train, y_train, X_val, y_val)
-    cnn_mae, cnn_rmse = test_cnn(cnn, X_test, y_test)
-    print("CNN test MAE/RMSE:", cnn_mae, cnn_rmse)
-
-    return {
-        "baseline": (baseline_mae, baseline_rmse),
-        "ridge": (ridge_mae, ridge_rmse),
-        "mlp": (mlp_mae, mlp_rmse),
-        "lstm": (lstm_mae, lstm_rmse),
-        "cnn": (cnn_mae, cnn_rmse),
-    }
+from config import TUCKER_RANKS, WINDOW, HORIZON, TRAIN_RATIO, VAL_RATIO
 
 
 def main():
-    # 1) load raw tensor
-    X_raw, Y, dates, mean, std = load_dataset()
-    print("Raw X shape:", X_raw.shape)
-
-    # 2) decompose
-    cp_res, tucker_res = run_all_decompositions(X_raw)
-
-    print("\nCP reconstruction errors:")
-    for r, (_, e) in cp_res.items():
-        print("  rank", r, "->", e)
-
-    print("\nTucker reconstruction errors:")
-    for ranks, (_, e) in tucker_res.items():
-        print("  ranks", ranks, "->", e)
-
-    # 3) windows for raw data
-    X_raw_win, y_raw = build_windows_from_tensor(X_raw, Y)
-    results = {}
-    results["raw"] = evaluate_setting("raw", X_raw_win, y_raw)
-
-    # 4) windows for CP
-    for r, (X_cp, err) in cp_res.items():
-        X_win, y = build_windows_from_tensor(X_cp, Y)
-        name = f"cp_rank_{r}"
-        results[name] = evaluate_setting(name, X_win, y)
-
-    # 5) windows for Tucker
-    for ranks, (X_tucker, err) in tucker_res.items():
-        X_win, y = build_windows_from_tensor(X_tucker, Y)
-        name = f"tucker_{ranks[0]}_{ranks[1]}_{ranks[2]}"
-        results[name] = evaluate_setting(name, X_win, y)
-
-    print("\n=== Summary (test MAE/RMSE) ===")
-    pprint(results)
-
-    # ---------- SAVE NUMERIC RESULTS ----------
-
     os.makedirs("results", exist_ok=True)
 
-    # 5a) Save decomposition summary
-    decomp_records = []
-    for r, (_, err) in cp_res.items():
-        decomp_records.append({
+    # 1. Load daily tensor
+    X, Y, dates, mean, std = load_dataset()
+    # X: (D, T, F), Y: (D, T)
+
+    # 2. Decompositions (CP/Tucker/PCA) on the DAILY tensor
+    cp_recon, tucker_recon, cp_latent_dict, pca_latent_dict = run_all_decompositions(X)
+
+    # 2a. Save reconstruction errors for later analysis
+    rows = []
+    for r, (_, rel_err) in cp_recon.items():
+        rows.append({
             "method": "cp",
             "rank": r,
             "rank1": r,
             "rank2": None,
             "rank3": None,
-            "rel_error": float(err),
+            "rel_error": rel_err,
         })
-
-    for (r1, r2, r3), (_, err) in tucker_res.items():
-        decomp_records.append({
+    for ranks, (_, rel_err) in tucker_recon.items():
+        r1, r2, r3 = ranks
+        rows.append({
             "method": "tucker",
             "rank": None,
             "rank1": r1,
             "rank2": r2,
             "rank3": r3,
-            "rel_error": float(err),
+            "rel_error": rel_err,
         })
-
-    df_decomp = pd.DataFrame(decomp_records)
+    df_decomp = pd.DataFrame(rows)
     df_decomp.to_csv("results/decomposition_summary.csv", index=False)
     print("Saved results/decomposition_summary.csv")
 
-    # 5b) Save model performance summary
+    # 3. Flatten to global time series (10-min grid)
+    X_ts_raw, y_ts = tensor_to_timeseries(X, Y)   # (N, F), (N,)
+    X_win_raw, y_win_raw = make_sliding_windows(X_ts_raw, y_ts)
+
+    # 3a. Persistence baseline y(t) = y(t-1) on raw target series
+    n_samples = X_win_raw.shape[0]
+    y_persist_all = np.zeros_like(y_win_raw)
+    for i in range(n_samples):
+        label_idx = i + WINDOW + HORIZON - 1      # index of y_ts used as label
+        prev_idx = label_idx - HORIZON            # last observed target
+        y_persist_all[i] = y_ts[prev_idx]
+
+    # 4. Build settings: RAW, CP-latent, PCA-latent, Tucker-latent
+    settings = []
+
+    # RAW windows (already Hankel)
+    settings.append(("raw", X_win_raw, y_win_raw))
+
+    # CP latent on DAILY tensor: Z_cp has shape (D, T, R_cp)
+    for r, Z_cp in cp_latent_dict.items():
+        X_ts_cp, _ = tensor_to_timeseries(Z_cp, Y)        # (N, R_cp)
+        X_win_cp, y_win_cp = make_sliding_windows(X_ts_cp, y_ts)
+        settings.append((f"cp_latent_r{r}", X_win_cp, y_win_cp))
+
+    # PCA latent on DAILY tensor: Z_pca has shape (D, T, k)
+    for k, Z_pca in pca_latent_dict.items():
+        X_ts_pca, _ = tensor_to_timeseries(Z_pca, Y)      # (N, k)
+        X_win_pca, y_win_pca = make_sliding_windows(X_ts_pca, y_ts)
+        settings.append((f"pca_k{k}", X_win_pca, y_win_pca))
+
+    # Tucker latent (mode-3 "feature compression") on DAILY tensor
+    for ranks in TUCKER_RANKS:
+        r1, r2, r3 = ranks
+        Z_tk_m3, _ = tucker_latent_features_mode3(X, ranks=ranks)
+        X_ts_tk_m3, _ = tensor_to_timeseries(Z_tk_m3, Y)  # (N, r3)
+        X_win_tk_m3, y_win_tk_m3 = make_sliding_windows(X_ts_tk_m3, y_ts)
+        settings.append((f"tucker_latent_m3_{r1}_{r2}_{r3}", X_win_tk_m3, y_win_tk_m3))
+
+    # OPTIONAL: Tucker latent via core contraction (more "multiway" features).
+    # Comment this block out if runtime is too high.
+    for ranks in TUCKER_RANKS:
+        r1, r2, r3 = ranks
+        Z_tk_core, _ = tucker_latent_features_core(X, ranks=ranks)
+        X_ts_tk_core, _ = tensor_to_timeseries(Z_tk_core, Y)
+        X_win_tk_core, y_win_tk_core = make_sliding_windows(X_ts_tk_core, y_ts)
+        settings.append((f"tucker_latent_core_{r1}_{r2}_{r3}", X_win_tk_core, y_win_tk_core))
+
+    # 5. Loop over settings and models (baseline, ridge, LSTM)
     perf_records = []
-    for setting_name, model_dict in results.items():
-        for model_name, (mae, rmse) in model_dict.items():
+
+    for setting_name, X_win, y_win in settings:
+        print(f"\n=== Setting: {setting_name} ===")
+        (X_train, y_train), (X_val, y_val), (X_test, y_test) = time_split(X_win, y_win)
+
+        # Standardize inputs per setting using TRAIN split only
+        mean = X_train.mean(axis=(0, 1), keepdims=True)
+        std = X_train.std(axis=(0, 1), keepdims=True) + 1e-8
+        X_train_s = (X_train - mean) / std
+        X_val_s = (X_val - mean) / std
+        X_test_s = (X_test - mean) / std
+
+        # 1) Persistence baseline (only once, for 'raw')
+        if setting_name == "raw":
+            N = len(y_win)
+            n_train = int(N * TRAIN_RATIO)
+            n_val = int(N * VAL_RATIO)
+            y_p_test = y_persist_all[n_train + n_val:]
+
+            mae, rmse = evaluate_regression(y_test, y_p_test)
             perf_records.append({
                 "setting": setting_name,
-                "model": model_name,
+                "model": "persistence",
                 "mae": float(mae),
                 "rmse": float(rmse),
             })
+
+            # save persistence predictions too
+            np.savez(
+                "results/preds_raw_persistence.npz",
+                y_test=y_test,
+                y_pred=y_p_test,
+            )
+
+        # 2) Ridge
+        ridge_model, _, _ = train_ridge(X_train_s, y_train, X_val_s, y_val)
+        mae, rmse = test_ridge(ridge_model, X_test_s, y_test)
+        perf_records.append({
+            "setting": setting_name,
+            "model": "ridge",
+            "mae": float(mae),
+            "rmse": float(rmse),
+        })
+
+        # save ridge predictions for this setting
+        s_test, w, f = X_test_s.shape
+        Xte = X_test_s.reshape(s_test, w * f)  # <-- flatten window
+        y_ridge_pred = ridge_model.predict(Xte).ravel()
+
+        np.savez(
+            f"results/preds_{setting_name}_ridge.npz",
+            y_test=y_test,
+            y_pred=y_ridge_pred,
+        )
+
+        # 3) LSTM
+        lstm_model, _ = train_lstm(X_train_s, y_train, X_val_s, y_val)
+        mae, rmse = test_lstm(lstm_model, X_test_s, y_test)
+        perf_records.append({
+            "setting": setting_name,
+            "model": "lstm",
+            "mae": float(mae),
+            "rmse": float(rmse),
+        })
+
+        # NEW: save LSTM predictions for this setting
+        y_lstm_pred = lstm_model.predict(X_test_s, verbose=0).ravel()
+        np.savez(
+            f"results/preds_{setting_name}_lstm.npz",
+            y_test=y_test,
+            y_pred=y_lstm_pred,
+        )
 
     df_perf = pd.DataFrame(perf_records)
     df_perf.to_csv("results/model_performance.csv", index=False)

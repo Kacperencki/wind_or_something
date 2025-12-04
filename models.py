@@ -117,8 +117,8 @@ def train_lstm(
     y_train,
     X_val,
     y_val,
-    epochs: int = 100,
-    batch_size: int = 32,
+    epochs: int = 50,
+    batch_size: int = 128,
 ):
     window = X_train.shape[1]
     n_features = X_train.shape[2]
@@ -127,7 +127,7 @@ def train_lstm(
 
     early = callbacks.EarlyStopping(
         monitor="val_loss",
-        patience=8,           # let it go a bit longer than before
+        patience=4,           # let it go a bit longer than before
         min_delta=1e-3,
         restore_best_weights=True,
     )
@@ -135,7 +135,7 @@ def train_lstm(
     lr_sched = callbacks.ReduceLROnPlateau(
         monitor="val_loss",
         factor=0.5,
-        patience=6,
+        patience=3,
         min_lr=1e-6,
     )
 

@@ -1,77 +1,147 @@
 # preprocess.py
 
+import os
 import numpy as np
 import pandas as pd
 
 from config import (
-    DATA_CSV, TIMESTAMP_COL, TARGET_COL, FEATURE_COLS,
-    RESAMPLE_RULE, SLOTS_PER_DAY, SEED
+    DATA_CSV,
+    TIMESTAMP_COL,
+    TARGET_COL,
+    FEATURE_COLS,
+    RESAMPLE_RULE,
+    SLOTS_PER_DAY,
+    SEED,
+    MAX_DAYS,
 )
+
+rng = np.random.default_rng(SEED)
+
+
+def _read_raw(path: str) -> pd.DataFrame:
+    """
+    Read the raw V52 file.
+    - If .xlsx/.xls: use read_excel.
+    - Otherwise: try read_csv with sensible defaults.
+    """
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext in [".xlsx", ".xls"]:
+        df = pd.read_excel(path)
+    else:
+        try:
+            df = pd.read_csv(path)
+        except UnicodeDecodeError:
+            df = pd.read_csv(path, encoding="latin1", sep=None, engine="python")
+
+    return df
 
 
 def load_and_resample() -> pd.DataFrame:
-    df = pd.read_csv(DATA_CSV)
+    """Load raw V52 SCADA and resample to a regular 10-min grid."""
+    df = _read_raw(DATA_CSV)
 
-    # parse timestamp: "01 01 2018 00:00"
+    if TIMESTAMP_COL not in df.columns:
+        raise ValueError(
+            f"Timestamp column '{TIMESTAMP_COL}' not found in file. "
+            f"Columns: {list(df.columns)}"
+        )
+
+    # Parse timestamps (Excel often already gives datetime, but this is safe)
     df[TIMESTAMP_COL] = pd.to_datetime(
         df[TIMESTAMP_COL],
-        dayfirst=True,          # 01 01 2018 -> 1st Jan, not 1st of month 1/2018
-        errors="coerce"
+        dayfirst=True,
+        errors="coerce",
     )
     df = df.dropna(subset=[TIMESTAMP_COL])
-    df = df.sort_values(TIMESTAMP_COL).set_index(TIMESTAMP_COL)
+    df = df.sort_values(TIMESTAMP_COL)
 
-    cols = FEATURE_COLS + [TARGET_COL]
-    df = df[cols]
+    # Replace "not active" sentinel -999 with NaN for all numeric columns
+    num_cols = df.select_dtypes(include=["number"]).columns
+    if len(num_cols) > 0:
+        df[num_cols] = df[num_cols].replace(-999, np.nan)
 
+    # Basic sanity filters for wind speed / power if present
+    if "WindSpeed" in df.columns:
+        df = df[df["WindSpeed"] >= 0]
+    if TARGET_COL in df.columns:
+        df = df[df[TARGET_COL] >= 0]
+
+    # Set index and resample to regular 10-min grid
+    df = df.set_index(TIMESTAMP_COL)
     df = df.resample(RESAMPLE_RULE).mean()
-    df = df.interpolate(method="time").dropna()
 
     return df
 
 
 def make_daily_tensor(df: pd.DataFrame):
     """
-    df indexed by DateTime, columns: FEATURES + TARGET.
-    Returns:
-        X: 3D array (D, T, F) of normalized features
-        Y: 2D array (D, T) of target
-    """
-    # add date and slot index
-    df = df.copy()
-    df["date"] = df.index.date
-    df["slot"] = df.groupby("date").cumcount()
+    Convert resampled dataframe into daily tensor X(D,T,F) and Y(D,T).
 
-    # keep only full days with SLOTS_PER_DAY samples
-    counts = df.groupby("date")["slot"].max() + 1
-    full_dates = counts[counts == SLOTS_PER_DAY].index
+    Keeps only days with a full SLOTS_PER_DAY samples.
+    Optionally limits to MAX_DAYS most recent days.
+    Standardizes features globally (per variable).
+    """
+    # Ensure required columns exist
+    cols_needed = [TARGET_COL] + FEATURE_COLS
+    for c in cols_needed:
+        if c not in df.columns:
+            raise ValueError(
+                f"Column '{c}' not found after resampling. "
+                f"Available: {list(df.columns)}"
+            )
+
+    # Drop rows with missing target or features
+    df = df.dropna(subset=cols_needed)
+
+    # Add date and slot index (0..SLOTS_PER_DAY-1)
+    df["date"] = df.index.date
+    df["slot"] = df.index.hour * (60 // 10) + df.index.minute // 10
+
+    # Keep only slots within [0, SLOTS_PER_DAY)
+    df = df[(df["slot"] >= 0) & (df["slot"] < SLOTS_PER_DAY)]
+
+    # Keep only full days
+    counts = df.groupby("date")["slot"].nunique()
+    full_dates_all = sorted(counts[counts == SLOTS_PER_DAY].index)
+
+    if MAX_DAYS is not None and len(full_dates_all) > MAX_DAYS:
+        # Use most recent MAX_DAYS (chronologically last)
+        full_dates = full_dates_all[-MAX_DAYS:]
+    else:
+        full_dates = full_dates_all
 
     df = df[df["date"].isin(full_dates)]
 
-    # sort by date then slot
-    df = df.sort_values(["date", "slot"])
-
-    # feature matrix and target
-    F = df[FEATURE_COLS].values
-    y = df[TARGET_COL].values
-
-    # normalize features (per feature)
-    mean = F.mean(axis=0, keepdims=True)
-    std = F.std(axis=0, keepdims=True) + 1e-8
-    F_norm = (F - mean) / std
-
-    # reshape into (D, T, F)
     D = len(full_dates)
     T = SLOTS_PER_DAY
-    num_features = len(FEATURE_COLS)
+    F = len(FEATURE_COLS)
 
-    X = F_norm.reshape(D, T, num_features)
-    Y = y.reshape(D, T)
+    if D == 0:
+        raise ValueError("No full days with SLOTS_PER_DAY samples found after cleaning.")
+
+    X = np.zeros((D, T, F), dtype=np.float32)
+    Y = np.zeros((D, T), dtype=np.float32)
+
+    for d_idx, d in enumerate(full_dates):
+        sub = df[df["date"] == d].sort_values("slot")
+        if len(sub) != T:
+            raise ValueError(f"Date {d} has {len(sub)} slots, expected {T}")
+
+        X[d_idx, :, :] = sub[FEATURE_COLS].values.astype(np.float32)
+        Y[d_idx, :] = sub[TARGET_COL].values.astype(np.float32)
+
+    # Standardize features globally
+    X_flat = X.reshape(-1, F)
+    mean = X_flat.mean(axis=0)
+    std = X_flat.std(axis=0) + 1e-8
+    X = (X - mean) / std
 
     return X, Y, full_dates, mean, std
 
 
 def load_dataset():
+    """Main entry used by run.py / raw_cp_pca_tucker.py."""
     df = load_and_resample()
     X, Y, dates, mean, std = make_daily_tensor(df)
     return X, Y, dates, mean, std
