@@ -99,14 +99,6 @@ def make_daily_tensor(df: pd.DataFrame):
                 f"Column '{c}' not found after resampling. "
                 f"Available: {list(df.columns)}"
             )
-    
-    # Validate data quality
-    print(f"Data validation - Shape: {df.shape}")
-    print(f"Date range: {df.index.min()} to {df.index.max()}")
-    missing_pct = df[cols_needed].isnull().sum() / len(df) * 100
-    for col in cols_needed:
-        if missing_pct[col] > 50:
-            print(f"Warning: {col} has {missing_pct[col]:.1f}% missing values")
 
     # Drop rows with missing target or features
     df = df.dropna(subset=cols_needed)

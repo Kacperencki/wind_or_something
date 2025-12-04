@@ -113,18 +113,10 @@ def main():
 
     # 5. Loop over settings and models (baseline, ridge, LSTM)
     perf_records = []
-    total_settings = len(settings)
 
-    for i, (setting_name, X_win, y_win) in enumerate(settings, 1):
-        print(f"\n=== Setting {i}/{total_settings}: {setting_name} ===")
-        print(f"Windows shape: X{X_win.shape}, y{y_win.shape}")
-        
-        try:
-            (X_train, y_train), (X_val, y_val), (X_test, y_test) = time_split(X_win, y_win)
-            print(f"Split sizes - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
-        except Exception as e:
-            print(f"Error in time split for {setting_name}: {e}")
-            continue
+    for setting_name, X_win, y_win in settings:
+        print(f"\n=== Setting: {setting_name} ===")
+        (X_train, y_train), (X_val, y_val), (X_test, y_test) = time_split(X_win, y_win)
 
         # Standardize inputs per setting using TRAIN split only
         mean = X_train.mean(axis=(0, 1), keepdims=True)
